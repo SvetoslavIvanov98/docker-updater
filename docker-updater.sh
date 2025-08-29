@@ -324,36 +324,53 @@ generate_run_cmd_from_inspect() {
   if [[ "$privileged" == "true" ]]; then echo 'RUN_CMD+=("--privileged")'; fi
 
   # Capabilities
-  jq -r '.[0].HostConfig.CapAdd[]? | @sh "--cap-add=\(.)"' <<<"$inspect_json" | while IFS= read -r line; do printf 'RUN_CMD+=(%s)\n' "$line"; done
-  jq -r '.[0].HostConfig.CapDrop[]? | @sh "--cap-drop=\(.)"' <<<"$inspect_json" | while IFS= read -r line; do printf 'RUN_CMD+=(%s)\n' "$line"; done
+  jq -r '.[0].HostConfig.CapAdd[]?' <<<"$inspect_json" | while IFS= read -r cap; do printf 'RUN_CMD+=("--cap-add=%s")\n' "$cap"; done
+  jq -r '.[0].HostConfig.CapDrop[]?' <<<"$inspect_json" | while IFS= read -r cap; do printf 'RUN_CMD+=("--cap-drop=%s")\n' "$cap"; done
 
   # Extra hosts
-  jq -r '.[0].HostConfig.ExtraHosts[]? | @sh "--add-host=\(.)"' <<<"$inspect_json" | while IFS= read -r line; do printf 'RUN_CMD+=(%s)\n' "$line"; done
+  jq -r '.[0].HostConfig.ExtraHosts[]?' <<<"$inspect_json" | while IFS= read -r host; do printf 'RUN_CMD+=("--add-host=%s")\n' "$host"; done
 
   # Ports
   jq -r '
     .[0].HostConfig.PortBindings // {} | to_entries[]? |
     .key as $cport |
-    .value[]? | [(.HostIp // ""), (.HostPort // ""), $cport] |
-    @sh ("--publish=\(if .[0] != "" then .[0] + ":" else "" end)\(if .[1] != "" then .[1] + ":" else "" end)\(.[2])")
-  ' <<<"$inspect_json" | while IFS= read -r line; do printf 'RUN_CMD+=(%s)\n' "$line"; done
+    .value[]? | [(.HostIp // ""), (.HostPort // ""), $cport] | @tsv
+  ' <<<"$inspect_json" | while IFS=$'\t' read -r hip hport cport; do
+    pub="";
+    if [[ -n "$hip" ]]; then pub+="$hip:"; fi
+    if [[ -n "$hport" ]]; then pub+="$hport:"; fi
+    pub+="$cport"
+    printf 'RUN_CMD+=("--publish=%s")\n' "$pub"
+  done
 
   # Volumes & mounts
   jq -r '
-    .[0].Mounts[]? | 
-    if .Type == "bind" then
-      @sh ("--volume=\(.Source):\(.Destination)\(if .RW then "" else ":ro" end)")
-    elif .Type == "volume" then
-      @sh ("--volume=\(.Name):\(.Destination)\(if .RW then "" else ":ro" end)")
-    elif .Type == "tmpfs" then
-      @sh ("--tmpfs=\(.Destination)")
-    else empty end
-  ' <<<"$inspect_json" | while IFS= read -r line; do printf 'RUN_CMD+=(%s)\n' "$line"; done
+    .[0].Mounts[]? | [ .Type, (.Source // ""), (.Name // ""), .Destination, (if .RW then "1" else "0" end) ] | @tsv
+  ' <<<"$inspect_json" | while IFS=$'\t' read -r mtype msrc mname mdest mrw; do
+    case "$mtype" in
+      bind)
+        opt="--volume=${msrc}:${mdest}";
+        ;;
+      volume)
+        opt="--volume=${mname}:${mdest}";
+        ;;
+      tmpfs)
+        opt="--tmpfs=${mdest}";
+        ;;
+      *) opt="";;
+    esac
+    if [[ -n "$opt" ]]; then
+      if [[ "$mtype" != "tmpfs" && "$mrw" != "1" ]]; then opt+=":ro"; fi
+      printf 'RUN_CMD+=("%s")\n' "$opt"
+    fi
+  done
 
   # Devices
   jq -r '
-    .[0].HostConfig.Devices[]? | @sh "--device=\(.PathOnHost):\(.PathInContainer):\(.CgroupPermissions)"
-  ' <<<"$inspect_json" | while IFS= read -r line; do printf 'RUN_CMD+=(%s)\n' "$line"; done
+    .[0].HostConfig.Devices[]? | [ .PathOnHost, .PathInContainer, .CgroupPermissions ] | @tsv
+  ' <<<"$inspect_json" | while IFS=$'\t' read -r dhost dctr dperm; do
+    printf 'RUN_CMD+=("--device=%s:%s:%s")\n' "$dhost" "$dctr" "$dperm"
+  done
 
   # Shm size
   local shm_size
@@ -361,30 +378,27 @@ generate_run_cmd_from_inspect() {
   if [[ "$shm_size" -gt 0 ]]; then printf 'RUN_CMD+=("--shm-size=%s")\n' "$shm_size"; fi
 
   # Environment
-  jq -r '.[0].Config.Env[]? | @sh "--env=\(.)"' <<<"$inspect_json" | while IFS= read -r line; do printf 'RUN_CMD+=(%s)\n' "$line"; done
+  jq -r '.[0].Config.Env[]?' <<<"$inspect_json" | while IFS= read -r envkv; do printf 'RUN_CMD+=("--env=%s")\n' "$envkv"; done
 
   # Labels (avoid compose labels to prevent accidental coupling)
   jq -r '
-    .[0].Config.Labels // {} | to_entries[]? | select(.key|test("^com\\.docker\\.compose\\." )|not) |
-    @sh "--label=\(.key)=\(.value)"
-  ' <<<"$inspect_json" | while IFS= read -r line; do printf 'RUN_CMD+=(%s)\n' "$line"; done
+    .[0].Config.Labels // {} | to_entries[]? | select(.key|test("^com\\.docker\\.compose\\." )|not) | [ .key, .value ] | @tsv
+  ' <<<"$inspect_json" | while IFS=$'\t' read -r lkey lval; do
+    printf 'RUN_CMD+=("--label=%s=%s")\n' "$lkey" "$lval"
+  done
 
-  # Entrypoint
-  local entrypoint
-  entrypoint=$(jq -cr '.[0].Config.Entrypoint // empty' <<<"$inspect_json")
-  if [[ -n "$entrypoint" && "$entrypoint" != "null" ]]; then
-    # Join array into a single string
-    local ep
-    ep=$(jq -r '.[0].Config.Entrypoint | @sh join(" ")' <<<"$inspect_json")
-    echo 'RUN_CMD+=("--entrypoint")'
-    printf 'RUN_CMD+=(%s)\n' "$ep"
+  # Entrypoint (use the first element if array)
+  local ep_first
+  ep_first=$(jq -r '.[0].Config.Entrypoint[0] // empty' <<<"$inspect_json")
+  if [[ -n "$ep_first" && "$ep_first" != "null" ]]; then
+    printf 'RUN_CMD+=("--entrypoint=%s")\n' "$ep_first"
   fi
 
   # Image
   printf 'RUN_CMD+=(%q)\n' "$image_ref"
 
   # Command
-  jq -r '.[0].Config.Cmd[]? | @sh "\(.)"' <<<"$inspect_json" | while IFS= read -r line; do printf 'RUN_CMD+=(%s)\n' "$line"; done
+  jq -r '.[0].Config.Cmd[]?' <<<"$inspect_json" | while IFS= read -r arg; do printf 'RUN_CMD+=("%s")\n' "$arg"; done
 }
 
 recreate_container_if_needed() {
