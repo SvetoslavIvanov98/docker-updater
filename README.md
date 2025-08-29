@@ -65,7 +65,7 @@ Per-user config is also supported at `~/.config/docker-updater.conf`.
 You can run the script manually:
 
 ```bash
-sudo /usr/local/bin/docker-updater --dry-run
+sudo docker-updater --dry-run
 ```
 
 Options:
