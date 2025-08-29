@@ -203,34 +203,50 @@ update_compose_projects() {
     [[ -z "$project" || -z "$wdir" ]] && continue
 
     # Normalize config files list: support ; or , or space separators
-    local cfg_args=( )
+    local cfg_args=( ) cfg_files=( )
     local sep_repl
     sep_repl=${cfgs//;/ } ; sep_repl=${sep_repl//,/ }
     for f in $sep_repl; do
       [[ -z "$f" ]] && continue
       cfg_args+=( -f "$f" )
+      cfg_files+=( "$f" )
     done
 
     if [[ "$COMPOSE_ONLY" == false && "$STANDALONE_ONLY" == true ]]; then
       continue
     fi
 
-    info "Updating Compose project '$project' in $wdir"
-    if [[ -d "$wdir" ]]; then
-      (
-        cd "$wdir"
-        if [[ ${#cfg_args[@]} -gt 0 ]]; then
-          drun docker compose "${cfg_args[@]}" pull
-          drun docker compose "${cfg_args[@]}" up -d --remove-orphans
-        else
-          drun docker compose pull
-          drun docker compose up -d --remove-orphans
+    local run_dir="$wdir"
+    if [[ ! -d "$run_dir" ]]; then
+      # Fallback: if we have absolute config files that exist, use the first one's directory
+      local alt_dir=""
+      for cf in "${cfg_files[@]}"; do
+        if [[ "$cf" = /* && -f "$cf" ]]; then
+          alt_dir=$(dirname -- "$cf")
+          break
         fi
-      )
-      success "Compose project '$project' updated"
-    else
-      warn "Working dir for project '$project' not found: $wdir"
+      done
+      if [[ -n "$alt_dir" && -d "$alt_dir" ]]; then
+        run_dir="$alt_dir"
+        info "Working dir missing; using config dir for '$project': $run_dir"
+      else
+        warn "Working dir for project '$project' not found: $wdir"
+        continue
+      fi
     fi
+
+    info "Updating Compose project '$project' in $run_dir"
+    (
+      cd "$run_dir"
+      if [[ ${#cfg_args[@]} -gt 0 ]]; then
+        drun docker compose "${cfg_args[@]}" pull
+        drun docker compose "${cfg_args[@]}" up -d --remove-orphans
+      else
+        drun docker compose pull
+        drun docker compose up -d --remove-orphans
+      fi
+    )
+    success "Compose project '$project' updated"
   done
 }
 
