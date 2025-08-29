@@ -238,6 +238,16 @@ update_compose_projects() {
     info "Updating Compose project '$project' in $run_dir"
     (
       cd "$run_dir"
+      # Ensure compose variable interpolation has needed env vars
+      if [[ -f .env ]]; then
+        # Export variables from .env without failing the whole script on minor issues
+        set +e
+        set -a
+        # shellcheck disable=SC1091
+        . ./.env
+        set +a
+        set -e
+      fi
       if [[ ${#cfg_args[@]} -gt 0 ]]; then
         drun docker compose "${cfg_args[@]}" pull
         drun docker compose "${cfg_args[@]}" up -d --remove-orphans
