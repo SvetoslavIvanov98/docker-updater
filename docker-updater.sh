@@ -29,6 +29,8 @@ STANDALONE_ONLY=${STANDALONE_ONLY:-false}
 LOG_FILE=${LOG_FILE:-"$DEFAULT_LOG_FILE"}
 STOP_TIMEOUT=${STOP_TIMEOUT:-30}
 PULL_ALL_PLATFORMS=${PULL_ALL_PLATFORMS:-false}
+ONLY_PROJECTS=${ONLY_PROJECTS:-}
+EXCLUDE_PROJECTS=${EXCLUDE_PROJECTS:-}
 
 # Colors for terminal (disabled when not a TTY)
 if [[ -t 1 ]]; then
@@ -91,6 +93,8 @@ Options:
   --exclude CONTAINERS     Space/comma-separated list of container names to skip
   --compose-only           Only update docker compose projects
   --standalone-only        Only update standalone (non-compose) containers
+  --only-projects NAMES    Space/comma-separated list of compose project names to update only
+  --exclude-projects NAMES Space/comma-separated list of compose project names to skip
   --log-file PATH          Write logs to PATH (default: $DEFAULT_LOG_FILE)
   --stop-timeout SECS      Timeout for docker stop (default: $STOP_TIMEOUT)
   -h, --help               Show this help
@@ -98,7 +102,7 @@ Options:
 
 Config file (optional): /etc/${SCRIPT_NAME}.conf or ~/.config/${SCRIPT_NAME}.conf
 Supported variables: DRY_RUN, PRUNE_UNUSED_IMAGES, ONLY_CONTAINERS, EXCLUDE_CONTAINERS,
-COMPOSE_ONLY, STANDALONE_ONLY, LOG_FILE, STOP_TIMEOUT
+COMPOSE_ONLY, STANDALONE_ONLY, ONLY_PROJECTS, EXCLUDE_PROJECTS, LOG_FILE, STOP_TIMEOUT
 EOF
 }
 
@@ -111,6 +115,8 @@ parse_args() {
       --exclude) EXCLUDE_CONTAINERS=${2:-}; shift 2;;
       --compose-only) COMPOSE_ONLY=true; shift;;
       --standalone-only) STANDALONE_ONLY=true; shift;;
+  --only-projects) ONLY_PROJECTS=${2:-}; shift 2;;
+  --exclude-projects) EXCLUDE_PROJECTS=${2:-}; shift 2;;
       --log-file) LOG_FILE=${2:-"$DEFAULT_LOG_FILE"}; shift 2;;
       --stop-timeout) STOP_TIMEOUT=${2:-30}; shift 2;;
       -h|--help) show_help; exit 0;;
@@ -165,6 +171,20 @@ should_process_container() {
   return 0
 }
 
+should_process_project() {
+  local name="$1"
+  local only_list exclude_list
+  only_list=( $(split_list "$ONLY_PROJECTS") )
+  exclude_list=( $(split_list "$EXCLUDE_PROJECTS") )
+  if [[ -n "$ONLY_PROJECTS" ]] && ! in_list "$name" "${only_list[@]}"; then
+    return 1
+  fi
+  if [[ -n "$EXCLUDE_PROJECTS" ]] && in_list "$name" "${exclude_list[@]}"; then
+    return 1
+  fi
+  return 0
+}
+
 pull_image_if_needed() {
   local image_ref="$1"
   if [[ "$PULL_ALL_PLATFORMS" == true ]]; then
@@ -201,6 +221,12 @@ update_compose_projects() {
   for line in "${proj_lines[@]}"; do
     IFS='|' read -r project wdir cfgs <<<"$line"
     [[ -z "$project" || -z "$wdir" ]] && continue
+
+    # Respect project filters
+    if ! should_process_project "$project"; then
+      info "Skipping Compose project (filtered): $project"
+      continue
+    fi
 
     # Normalize config files list: support ; or , or space separators
     local cfg_args=( ) cfg_files=( )
